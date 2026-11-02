@@ -418,6 +418,17 @@ pub trait Engine: Send + Sync {
         query: &Query,
     ) -> Result<Vec<EngineItem>, EngineError>;
 
+    /// Optional request that must complete before [`Engine::build_request`].
+    /// Engines that do not need token/bootstrap state keep the default `None`.
+    fn preflight_request(&self, _query: &Query, _pageno: u32) -> Option<EngineRequest> {
+        None
+    }
+
+    /// Consume the optional preflight response and update engine-local state.
+    fn preflight(&self, _response: &EngineResponse, _query: &Query) -> Result<(), EngineError> {
+        Ok(())
+    }
+
     /// Whether this engine queries a local database instead of HTTP
     /// (upstream `engine_type = "offline"`). Offline engines run
     /// [`Engine::search_offline`] on a blocking thread.

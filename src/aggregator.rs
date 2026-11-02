@@ -568,6 +568,16 @@ impl Searcher {
                 Err(_) => Err(FailureKind::Timeout),
             };
         }
+        if let Some(preflight) = engine.preflight_request(&request.query, request.pageno) {
+            let response = self
+                .network
+                .fetch(preflight, timeout, None, engine.proxy())
+                .await
+                .map_err(|error| error.failure_kind())?;
+            engine
+                .preflight(&response, &request.query)
+                .map_err(|error| FailureKind::from(&error))?;
+        }
         let engine_request = engine
             .build_request(&request.query, request.pageno)
             .map_err(|error| FailureKind::from(&error))?;
