@@ -78,6 +78,34 @@ async fn get_uri(app: &Router, uri: &str) -> (StatusCode, String, axum::http::He
     (status, body, headers)
 }
 
+#[test]
+fn reference_engines_feed_infoboxes_not_ranked_results() {
+    use rustxng::engine::{EngineRegistry, EngineResponse};
+    use rustxng::query::Query;
+    use rustxng::results::ResultContainer;
+
+    let query = Query::parse("Tokyo", &EngineRegistry::default(), &[]);
+    let mut container = ResultContainer::new();
+    for (name, body) in [
+        (
+            "wikipedia",
+            r#"{"query":{"search":[{"title":"Tokyo","pageid":"1","snippet":"capital"}]}}"#,
+        ),
+        (
+            "wikidata",
+            r#"{"search":[{"id":"Q1344","label":"Tokyo","description":"capital"}]}"#,
+        ),
+    ] {
+        let config = EngineConfig::new(name, name, name, &["general"]);
+        let engine = rustxng::engines::build(&config).unwrap();
+        let response = EngineResponse::new(200, "https://example.org", body.as_bytes().to_vec());
+        container.extend(name, 1.0, engine.parse(&response, &query).unwrap());
+    }
+    container.close(|_| 1.0, &[], 0.0, "Tokyo", 0.0);
+    assert!(container.ordered().is_empty());
+    assert_eq!(container.infoboxes.len(), 2);
+}
+
 #[tokio::test]
 async fn json_search_returns_merged_results() {
     let base_url = start_fake_engine().await;

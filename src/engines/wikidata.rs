@@ -1,4 +1,8 @@
 //! Wikidata engine, ported from `searx/engines/wikidata.py`.
+//!
+//! The top entity hit becomes a bounded infobox instead of ranked main
+//! results: entity hits are reference material, and mixing them into the
+//! ordinary result list skews the ranking.
 
 use std::sync::Arc;
 
@@ -7,6 +11,7 @@ use crate::engine::{
     Engine, EngineDefaults, EngineError, EngineItem, EngineMeta, EngineRequest, EngineResponse,
 };
 use crate::query::Query;
+use crate::results::{Infobox, InfoboxUrl};
 use crate::settings::EngineConfig;
 
 const DEFAULTS: EngineDefaults = EngineDefaults {
@@ -71,22 +76,81 @@ impl Engine for Wikidata {
             Some(items) => items,
             None => return Ok(Vec::new()),
         };
-        let mut results = Vec::new();
-        for item in items {
-            let id = json_str(item, "id");
-            if id.is_empty() {
-                continue;
-            }
-            let title = {
-                let label = json_str(item, "label");
-                if label.is_empty() { id.clone() } else { label }
-            };
-            results.push(
-                ResultBuilder::new(format!("https://www.wikidata.org/wiki/{id}"), title)
-                    .content(json_str(item, "description"))
-                    .build(),
-            );
+        // One bounded infobox from the top hit; no ranked main results.
+        let Some(item) = items.first() else {
+            return Ok(Vec::new());
+        };
+        let id = json_str(item, "id");
+        if id.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(results)
+        let title = {
+            let label = json_str(item, "label");
+            if label.is_empty() { id.clone() } else { label }
+        };
+        let url = format!("https://www.wikidata.org/wiki/{id}");
+        Ok(vec![EngineItem::Infobox(Infobox {
+            id: "wikidata".to_string(),
+            title: title.clone(),
+            content: json_str(item, "description"),
+            img_src: None,
+            url: Some(url.clone()),
+            urls: vec![InfoboxUrl {
+                title: title.clone(),
+                url,
+            }],
+            ..Default::default()
+        })])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FIXTURE: &str = r##"{
+      "search": [
+        {"id": "Q1344", "label": "Tokyo", "description": "capital of Japan"},
+        {"id": "Q205769", "label": "Tokyo Tower", "description": "tower in Minato, Tokyo"}
+      ]
+    }"##;
+
+    fn engine() -> Arc<Wikidata> {
+        Wikidata::from_config(&EngineConfig::new(
+            "wikidata",
+            "wikidata",
+            "wd",
+            &["general"],
+        ))
+        .expect("wikidata engine")
+    }
+
+    #[test]
+    fn parses_a_bounded_infobox_from_the_top_hit() {
+        let response = EngineResponse::new(200, API_URL, FIXTURE.as_bytes().to_vec());
+        let query = Query::parse("tokyo", &crate::engine::EngineRegistry::default(), &[]);
+        let items = engine().parse(&response, &query).unwrap();
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            EngineItem::Infobox(infobox) => {
+                assert_eq!(infobox.id, "wikidata");
+                assert_eq!(infobox.title, "Tokyo");
+                assert_eq!(infobox.content, "capital of Japan");
+                assert_eq!(
+                    infobox.url.as_deref(),
+                    Some("https://www.wikidata.org/wiki/Q1344")
+                );
+                assert_eq!(infobox.urls.len(), 1);
+                assert_eq!(infobox.urls[0].url, "https://www.wikidata.org/wiki/Q1344");
+            }
+            other => panic!("expected an infobox, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_search_is_empty() {
+        let response = EngineResponse::new(200, API_URL, b"{}".to_vec());
+        let query = Query::parse("tokyo", &crate::engine::EngineRegistry::default(), &[]);
+        assert!(engine().parse(&response, &query).unwrap().is_empty());
     }
 }
