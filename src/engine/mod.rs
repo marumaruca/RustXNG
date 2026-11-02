@@ -418,6 +418,15 @@ pub trait Engine: Send + Sync {
         query: &Query,
     ) -> Result<Vec<EngineItem>, EngineError>;
 
+    /// Whether this engine can answer the query at all.
+    ///
+    /// The default keeps ordinary engines unchanged. Syntax-gated engines can
+    /// override this so unrelated general searches skip them before request
+    /// construction and failure accounting.
+    fn is_applicable(&self, _query: &Query) -> bool {
+        true
+    }
+
     /// Whether this engine queries a local database instead of HTTP
     /// (upstream `engine_type = "offline"`). Offline engines run
     /// [`Engine::search_offline`] on a blocking thread.

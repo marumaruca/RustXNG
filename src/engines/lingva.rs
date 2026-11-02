@@ -49,26 +49,18 @@ fn base_url(meta: &EngineMeta) -> String {
         .to_string()
 }
 
-fn is_language_code(value: &str) -> bool {
-    (2..=3).contains(&value.len()) && value.chars().all(|c| c.is_ascii_alphabetic())
+fn explicit_direction(query: &Query) -> Option<(String, String, String)> {
+    online_dictionary_direction(&query.query_text())
 }
 
 /// Split the from-to prefix off the query, like upstream's dictionary
 /// processor. Without a prefix the source language is detected and the text
 /// is translated into the requested engine language.
 fn direction(query: &Query) -> (String, String, String) {
-    let text = query.query_text();
-    let mut parts = text.splitn(2, ' ');
-    let first = parts.next().unwrap_or_default();
-    let rest = parts.next().unwrap_or_default().trim();
-    if !rest.is_empty() {
-        let mut codes = first.split('-');
-        if let (Some(from), Some(to), None) = (codes.next(), codes.next(), codes.next()) {
-            if is_language_code(from) && is_language_code(to) {
-                return (from.to_lowercase(), to.to_lowercase(), rest.to_string());
-            }
-        }
+    if let Some(direction) = explicit_direction(query) {
+        return direction;
     }
+    let text = query.query_text();
     let language = locale_language(&query.engine_language());
     let to = if language == "all" {
         "en".to_string()
@@ -85,6 +77,10 @@ fn is_http(url: &str) -> bool {
 impl Engine for Lingva {
     fn meta(&self) -> &EngineMeta {
         &self.meta
+    }
+
+    fn is_applicable(&self, query: &Query) -> bool {
+        explicit_direction(query).is_some()
     }
 
     fn build_request(&self, query: &Query, _pageno: u32) -> Result<EngineRequest, EngineError> {
@@ -213,5 +209,15 @@ mod tests {
         let response = EngineResponse::new(200, BASE_URL, b"{}".to_vec());
         let items = engine().parse(&response, &query("en-de hello")).unwrap();
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn applicability_requires_the_language_pair_prefix() {
+        assert!(engine().is_applicable(&query("en-de hello")));
+        assert!(engine().is_applicable(&query("ja-en 東京")));
+        assert!(engine().is_applicable(&query("english-german hallo")));
+        assert!(!engine().is_applicable(&query("hello world")));
+        assert!(!engine().is_applicable(&query("en-de")));
+        assert!(!engine().is_applicable(&query("xx-yy hello")));
     }
 }

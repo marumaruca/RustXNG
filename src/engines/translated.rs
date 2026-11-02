@@ -61,39 +61,22 @@ fn is_http_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
-fn is_language_code(value: &str) -> bool {
-    value.len() == 2
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphabetic())
-}
-
 /// Upstream search syntax: a from-to pair followed by the text.
 fn direction(query: &Query) -> Option<Direction> {
-    let source = query.query_text();
-    let mut parts = source.splitn(2, ' ');
-    let first = parts.next()?;
-    let rest = parts.next().unwrap_or_default().trim();
-    if rest.is_empty() {
-        return None;
-    }
-    let mut codes = first.split('-');
-    let (Some(from), Some(to), None) = (codes.next(), codes.next(), codes.next()) else {
-        return None;
-    };
-    if !is_language_code(from) || !is_language_code(to) {
-        return None;
-    }
-    Some(Direction {
-        from: from.to_lowercase(),
-        to: to.to_lowercase(),
-        text: rest.to_string(),
+    online_dictionary_direction(&query.query_text()).map(|(from, to, text)| Direction {
+        from,
+        to,
+        text,
     })
 }
 
 impl Engine for Translated {
     fn meta(&self) -> &EngineMeta {
         &self.meta
+    }
+
+    fn is_applicable(&self, query: &Query) -> bool {
+        direction(query).is_some()
     }
 
     fn build_request(&self, query: &Query, _pageno: u32) -> Result<EngineRequest, EngineError> {
@@ -239,5 +222,14 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn applicability_requires_the_language_pair_prefix() {
+        assert!(engine().is_applicable(&query("en-de hello world")));
+        assert!(engine().is_applicable(&query("english-german hallo welt")));
+        assert!(!engine().is_applicable(&query("hello")));
+        assert!(!engine().is_applicable(&query("en-de")));
+        assert!(!engine().is_applicable(&query("xx-yy hello")));
     }
 }

@@ -37,41 +37,27 @@ impl Dictzone {
         let meta = EngineMeta::from_config(config, DEFAULTS);
         Ok(Arc::new(Self { meta }))
     }
+
+    #[test]
+    fn applicability_requires_the_language_pair_prefix() {
+        assert!(engine().is_applicable(&query("en-de hello")));
+        assert!(engine().is_applicable(&query("english-german hallo")));
+        assert!(!engine().is_applicable(&query("hello world")));
+        assert!(!engine().is_applicable(&query("en-de")));
+        assert!(!engine().is_applicable(&query("xx-yy hello")));
+    }
 }
 
-/// Upstream maps the locale to a dictionary name such as "english-german".
-///
-/// "en-de" means English to German; a plain locale translates to itself.
-fn dictionary_name(locale: &str) -> (String, String) {
-    let mut parts = locale.split(['-', '_']);
-    let from = parts.next().unwrap_or("en").to_lowercase();
-    let to = parts
-        .next()
-        .map(str::to_lowercase)
-        .unwrap_or_else(|| from.clone());
-    (language_name(&from), language_name(&to))
+fn direction(query: &Query) -> Option<(String, String, String)> {
+    online_dictionary_direction(&query.query_text())
 }
 
 fn language_name(language: &str) -> String {
-    let name = match language {
-        "en" => "english",
-        "de" => "german",
-        "fr" => "french",
-        "es" => "spanish",
-        "it" => "italian",
-        "pl" => "polish",
-        "ru" => "russian",
-        "hu" => "hungarian",
-        "cs" => "czech",
-        "sk" => "slovak",
-        "pt" => "portuguese",
-        "nl" => "dutch",
-        "tr" => "turkish",
-        "ja" => "japanese",
-        "zh" => "chinese",
-        other => other,
-    };
-    name.to_string()
+    crate::locales::LOCALES
+        .iter()
+        .find(|locale| locale.id == language)
+        .map(|locale| locale.english.to_lowercase())
+        .unwrap_or_else(|| language.to_string())
 }
 
 impl Engine for Dictzone {
@@ -79,12 +65,22 @@ impl Engine for Dictzone {
         &self.meta
     }
 
+    fn is_applicable(&self, query: &Query) -> bool {
+        direction(query).is_some()
+    }
+
     fn build_request(&self, query: &Query, _pageno: u32) -> Result<EngineRequest, EngineError> {
+        let Some((from, to, text)) = direction(query) else {
+            return Err(EngineError::Message(
+                "dictzone expects a query like en-de hello".to_string(),
+            ));
+        };
         let base = self.meta.base_url.as_deref().unwrap_or(BASE_URL);
-        let (from, to) = dictionary_name(&query.locale);
         Ok(EngineRequest::get(format!(
-            "{base}/{from}-{to}-dictionary/{}",
-            encode(&query.query_text())
+            "{base}/{}-{}-dictionary/{}",
+            language_name(&from),
+            language_name(&to),
+            encode(&text)
         )))
     }
 
@@ -93,9 +89,11 @@ impl Engine for Dictzone {
         response: &EngineResponse,
         query: &Query,
     ) -> Result<Vec<EngineItem>, EngineError> {
+        if direction(query).is_none() {
+            return Ok(Vec::new());
+        }
         let html = parse_html(&response.text());
-        let base = self.meta.base_url.as_deref().unwrap_or(BASE_URL);
-        let url = format!("{base}/{}", encode(&query.query_text()));
+        let url = self.build_request(query, 1)?.url;
         let mut results = Vec::new();
         for row in select_elements(&html, "table#r tr")? {
             let cells = children(row, "td");
@@ -140,16 +138,27 @@ mod tests {
             .expect("engine")
     }
 
+    fn query(text: &str) -> Query {
+        Query::parse(text, &crate::engine::EngineRegistry::default(), &[])
+    }
+
     #[test]
-    fn builds_the_dictionary_url() {
-        let mut query = Query::parse("hello", &crate::engine::EngineRegistry::default(), &[]);
-        query.locale = "en-DE".to_string();
-        let request = engine().build_request(&query, 1).unwrap();
-        assert!(
-            request
-                .url
-                .starts_with("https://dictzone.com/english-german-dictionary/hello")
+    fn builds_the_dictionary_url_from_the_query_prefix() {
+        let mut q = query("en-de hello");
+        q.locale = "ja-JP".to_string();
+        let request = engine().build_request(&q, 1).unwrap();
+        assert_eq!(
+            request.url,
+            "https://dictzone.com/english-german-dictionary/hello"
         );
+        assert_eq!(
+            engine()
+                .build_request(&query("english-german hallo"), 1)
+                .unwrap()
+                .url,
+            "https://dictzone.com/english-german-dictionary/hallo"
+        );
+        assert!(engine().build_request(&query("hello"), 1).is_err());
     }
 
     #[test]
@@ -159,13 +168,18 @@ mod tests {
             <tr><td><i>hello</i> world</td><td><p>hallo</p><p>servus</p></td></tr>
         </table>"##;
         let response = EngineResponse::new(200, BASE_URL, html.as_bytes().to_vec());
-        let query = Query::parse("hello", &crate::engine::EngineRegistry::default(), &[]);
-        let items = engine().parse(&response, &query).unwrap();
+        let items = engine()
+            .parse(&response, &query("en-de hello world"))
+            .unwrap();
         assert_eq!(items.len(), 1);
         match &items[0] {
             EngineItem::Result(result) => {
                 assert_eq!(result.title, "hello world");
                 assert!(result.content.contains("hallo"));
+                assert_eq!(
+                    result.url,
+                    "https://dictzone.com/english-german-dictionary/hello%20world"
+                );
             }
             _ => panic!("expected a result"),
         }

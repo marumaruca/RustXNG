@@ -278,11 +278,17 @@ impl Searcher {
                 return response;
             }
         }
-        let engines = self.select_engines(&request);
+        let mut engines = self.select_engines(&request);
         if engines.is_empty() {
             response.error = Some("no engine selected for this request".to_string());
             return response;
         }
+        // Some upstream online processors only apply when the query carries
+        // their own syntax (for example currency conversion or a translation
+        // language pair). Skip those engines before requests and failure
+        // accounting instead of reporting an unrelated general query as an
+        // engine failure.
+        engines.retain(|engine| engine.is_applicable(&request.query));
 
         // 全 engine の完了を待つ（join_all）。
         //
@@ -1010,12 +1016,15 @@ mod orchestration_tests {
     use super::*;
     use crate::engine::{Engine, EngineError, EngineMeta, EngineRequest, EngineResponse};
 
+    type ApplicabilityPredicate = Box<dyn Fn(&Query) -> bool + Send + Sync>;
+
     /// An engine that never touches the network: it either fails while
     /// building the request or returns synthetic results.
     struct FakeEngine {
         meta: EngineMeta,
         results: usize,
         build_error: bool,
+        applicable: Option<ApplicabilityPredicate>,
     }
 
     impl FakeEngine {
@@ -1024,6 +1033,16 @@ mod orchestration_tests {
             categories: &[&str],
             results: usize,
             build_error: bool,
+        ) -> EngineHandle {
+            Self::build_with_predicate(name, categories, results, build_error, None)
+        }
+
+        fn build_with_predicate(
+            name: &str,
+            categories: &[&str],
+            results: usize,
+            build_error: bool,
+            applicable: Option<ApplicabilityPredicate>,
         ) -> EngineHandle {
             let config = crate::settings::EngineConfig::new(name, "fake", name, categories);
             let mut meta = EngineMeta::from_config(
@@ -1039,6 +1058,7 @@ mod orchestration_tests {
                 meta,
                 results,
                 build_error,
+                applicable,
             })
         }
     }
@@ -1046,6 +1066,12 @@ mod orchestration_tests {
     impl Engine for FakeEngine {
         fn meta(&self) -> &EngineMeta {
             &self.meta
+        }
+        fn is_applicable(&self, query: &Query) -> bool {
+            self.applicable
+                .as_ref()
+                .map(|predicate| predicate(query))
+                .unwrap_or(true)
         }
         fn build_request(&self, query: &Query, _pageno: u32) -> Result<EngineRequest, EngineError> {
             if self.build_error {
@@ -1168,6 +1194,44 @@ mod orchestration_tests {
         assert!(response.results.is_empty());
         assert_eq!(response.unresponsive_engines.len(), 1);
         assert_eq!(response.unresponsive_engines[0].engine, "broken");
+    }
+
+    #[tokio::test]
+    async fn inapplicable_engines_are_skipped_without_failure() {
+        let searcher = searcher(vec![
+            FakeEngine::build_with_predicate(
+                "syntax engine",
+                &["general"],
+                1,
+                true,
+                Some(Box::new(|query| query.query_text().starts_with("run:"))),
+            ),
+            FakeEngine::build("web engine", &["general"], 0, true),
+        ]);
+        let request = SearchRequest::new(query("ordinary query", &searcher.registry));
+        let response = searcher.search(request).await;
+        assert!(!response.engines.contains(&"syntax engine".to_string()));
+        assert!(
+            response
+                .unresponsive_engines
+                .iter()
+                .all(|engine| engine.engine != "syntax engine")
+        );
+    }
+
+    #[tokio::test]
+    async fn matching_syntax_keeps_the_engine_in_the_run_set() {
+        let searcher = searcher(vec![FakeEngine::build_with_predicate(
+            "syntax engine",
+            &["general"],
+            0,
+            true,
+            Some(Box::new(|query| query.query_text().starts_with("run:"))),
+        )]);
+        let request = SearchRequest::new(query("run: value", &searcher.registry));
+        let response = searcher.search(request).await;
+        assert_eq!(response.engines, vec!["syntax engine".to_string()]);
+        assert_eq!(response.unresponsive_engines.len(), 1);
     }
 
     #[tokio::test]

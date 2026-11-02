@@ -122,6 +122,10 @@ impl Engine for CurrencyConvert {
         &self.meta
     }
 
+    fn is_applicable(&self, query: &Query) -> bool {
+        conversion(&query.query_text()).is_some()
+    }
+
     fn build_request(&self, query: &Query, _pageno: u32) -> Result<EngineRequest, EngineError> {
         let Some(conversion) = conversion(&query.query_text()) else {
             return Err(EngineError::Message(
@@ -212,6 +216,14 @@ mod tests {
     #[test]
     fn an_unrelated_query_is_rejected() {
         assert!(engine().build_request(&query("bitcoin"), 1).is_err());
+    }
+
+    #[test]
+    fn applicability_matches_the_conversion_syntax() {
+        assert!(engine().is_applicable(&query("10 usd to eur")));
+        assert!(engine().is_applicable(&query("5 dollars in euros")));
+        assert!(!engine().is_applicable(&query("bitcoin")));
+        assert!(!engine().is_applicable(&query("tokyo")));
     }
 
     #[test]
